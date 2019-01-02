@@ -85,25 +85,30 @@ func (v3 *EtcdV3) Watch(ctx context.Context, key string, withPrefix bool) backen
 
 	go func() {
 		for {
-			resp := <-etcdChan
-			if resp.Canceled {
-				log.Println("etcd watching canceled", resp.Err())
+			select {
+			case <-ctx.Done():
 				return
-			}
-			for _, evt := range resp.Events {
-				wEvent := &backend.WatchEvent{
-					KVPair: backend.KVPair{
-						Key:   string(evt.Kv.Key),
-						Value: string(evt.Kv.Value),
-					},
-				}
-				if evt.Type == mvccpb.PUT {
-					wEvent.Type = backend.Put
-				} else {
-					wEvent.Type = backend.Delete
-				}
 
-				eventsChan <- wEvent
+			case resp := <-etcdChan:
+				if resp.Canceled {
+					log.Println("etcd watching failure", resp.Err())
+					return
+				}
+				for _, evt := range resp.Events {
+					wEvent := &backend.WatchEvent{
+						KVPair: backend.KVPair{
+							Key:   string(evt.Kv.Key),
+							Value: string(evt.Kv.Value),
+						},
+					}
+					if evt.Type == mvccpb.PUT {
+						wEvent.Type = backend.Put
+					} else {
+						wEvent.Type = backend.Delete
+					}
+
+					eventsChan <- wEvent
+				}
 			}
 		}
 	}()
