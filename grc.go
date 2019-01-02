@@ -14,13 +14,23 @@ import (
 	"github.com/youlu-cn/grc/backend/etcd/v3"
 )
 
+var (
+	ErrCallback = errors.New("invalid callback")
+)
+
 type AtomicUpdateConfig func(interface{})
 type AtomicUpdateNodes func([]string)
 
-func NewProvider(ctx context.Context, typ backend.ProviderType, endPoint, user, password string) (backend.Provider, error) {
+type ProviderType string
+
+const (
+	EtcdV3 ProviderType = backend.EtcdV3
+)
+
+func NewProvider(typ ProviderType, endPoint, user, password string) (backend.Provider, error) {
 	switch typ {
 	case backend.EtcdV3:
-		return etcdv3.NewProvider(ctx, endPoint, user, password)
+		return etcdv3.NewProvider(endPoint, user, password)
 	default:
 		return nil, nil
 	}
@@ -38,18 +48,24 @@ type RemoteConfig struct {
 	provider backend.Provider
 }
 
-// Register for service discovery
-func (rc *RemoteConfig) Register(path, nodeID string, ttl time.Duration) error {
+// Register node for service discovery
+func (rc *RemoteConfig) RegisterNode(path, nodeID string, ttl time.Duration) error {
 	key := fmt.Sprintf("%v/%v", path, nodeID)
-	return rc.provider.KeepAlive(key, ttl)
+	return rc.provider.KeepAlive(rc.ctx, key, ttl)
 }
 
 // Subscribe specified service nodes
-func (rc *RemoteConfig) Subscribe(path string, callback AtomicUpdateNodes) ([]string, error) {
-	evtChan := rc.provider.Watch(path, true)
-	kvs, err := rc.provider.Get(path, true)
+func (rc *RemoteConfig) SubscribeNodes(path string, callback AtomicUpdateNodes) error {
+	if callback == nil {
+		return ErrCallback
+	}
+
+	ctx, cancel := context.WithCancel(rc.ctx)
+	evtChan := rc.provider.Watch(ctx, path, true)
+	kvs, err := rc.provider.Get(rc.ctx, path, true)
 	if err != nil {
-		return nil, err
+		cancel()
+		return err
 	}
 	// parse node list
 	nodes := make([]string, 0, len(kvs))
@@ -59,24 +75,27 @@ func (rc *RemoteConfig) Subscribe(path string, callback AtomicUpdateNodes) ([]st
 	}
 	// sort node list
 	sort.Strings(nodes)
+	// callback
+	callback(nodes)
 	// watch and update
-	if callback != nil {
-		go rc.nodeUpdated(evtChan, path, nodes, callback)
-	}
+	go rc.nodeUpdated(evtChan, path, nodes, callback)
 
-	return nodes, nil
+	return nil
 }
 
-// Get remote config, return value type is the same as val which is reflect.TypeOf(val).
-func (rc *RemoteConfig) Get(path string, val interface{}, callback AtomicUpdateConfig) (interface{}, error) {
-	var (
-		config interface{}
-	)
+// Subscribe remote config, return value type is the same as val which is reflect.TypeOf(val).
+func (rc *RemoteConfig) SubscribeConf(path string, val interface{}, callback AtomicUpdateConfig) error {
+	if callback == nil {
+		return ErrCallback
+	}
 
-	evtChan := rc.provider.Watch(path, false)
-	kvs, err := rc.provider.Get(path, false)
+	var config interface{}
+	ctx, cancel := context.WithCancel(rc.ctx)
+	evtChan := rc.provider.Watch(ctx, path, false)
+	kvs, err := rc.provider.Get(rc.ctx, path, false)
 	if err != nil {
-		return nil, err
+		cancel()
+		return err
 	}
 	// decode config
 	if len(kvs) == 0 {
@@ -86,14 +105,14 @@ func (rc *RemoteConfig) Get(path string, val interface{}, callback AtomicUpdateC
 	}
 	if config == nil {
 		log.Println("decode config failed", kvs[0].Value)
-		return nil, errors.New("decode config failed:" + kvs[0].Value)
+		return errors.New("decode config failed:" + kvs[0].Value)
 	}
+	// callback
+	callback(config)
 	// watch for config updated
-	if callback != nil {
-		go rc.configUpdated(evtChan, val, callback)
-	}
+	go rc.configUpdated(evtChan, val, callback)
 
-	return config, err
+	return nil
 }
 
 func (rc *RemoteConfig) defaultValue(val interface{}) interface{} {
