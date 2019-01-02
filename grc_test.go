@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 
 var (
 	provider = NewTestProvider()
-	rc       = New(context.TODO(), provider)
+	rc, _    = NewWithProvider(context.TODO(), provider)
 )
 
 type Value struct {
@@ -173,53 +172,28 @@ var (
 	}
 )
 
-var (
-	conf_Get           atomic.Value
-	conf_GetDefault    atomic.Value
-	conf_GetDefaultPtr atomic.Value
-	getConf_Get        = func() interface{} {
-		return conf_Get.Load()
-	}
-	getConf_GetDefault = func() interface{} {
-		return conf_GetDefault.Load()
-	}
-	getConf_GetDefaultPtr = func() interface{} {
-		return conf_GetDefaultPtr.Load()
-	}
-)
-
-func confCallback_Get(val interface{}) {
-	conf_Get.Store(val)
-}
-
-func confCallback_GetDefault(val interface{}) {
-	conf_GetDefault.Store(val)
-}
-
-func confCallback_GetDefaultPtr(val interface{}) {
-	conf_GetDefaultPtr.Store(val)
-}
-
 func TestRemoteConfig_GetDefault(t *testing.T) {
-	err := rc.SubscribeConf("/test/conf/TestRemoteConfig_GetDefault", TestConfig{}, confCallback_GetDefault)
+	path := "/test/conf/TestRemoteConfig_GetDefault"
+	err := rc.SubscribeConf(path, TestConfig{})
 	if err != nil {
 		t.Fatal("get config fail", err)
 	}
-	if config, ok := getConf_GetDefault().(TestConfig); !ok || !reflect.DeepEqual(config, defVal) {
+	if config, ok := rc.GetConf(path).(TestConfig); !ok || !reflect.DeepEqual(config, defVal) {
 		t.Fatal("parse err", config, defVal, ok)
 	}
 
-	err = rc.SubscribeConf("/test/conf/TestRemoteConfig_GetDefault", &TestConfig{}, confCallback_GetDefaultPtr)
+	err = rc.SubscribeConf(path, &TestConfig{})
 	if err != nil {
 		t.Fatal("get config ptr fail", err)
 	}
-	if pc, ok := getConf_GetDefaultPtr().(*TestConfig); !ok || !reflect.DeepEqual(pc, &defVal) {
+	if pc, ok := rc.GetConf(path).(*TestConfig); !ok || !reflect.DeepEqual(pc, &defVal) {
 		t.Fatal("parse err", pc, defVal, ok)
 	}
 }
 
 func TestRemoteConfig_Get(t *testing.T) {
-	_ = provider.Put(context.TODO(), "/test/conf/TestRemoteConfig_Get", `{"int_val":0,"MapVal":{"key":{}}}`, time.Minute)
+	path := "/test/conf/TestRemoteConfig_Get"
+	_ = provider.Put(context.TODO(), path, `{"int_val":0,"MapVal":{"key":{}}}`, time.Minute)
 
 	conf := TestConfig{
 		IntVal:   0,
@@ -230,24 +204,13 @@ func TestRemoteConfig_Get(t *testing.T) {
 		},
 	}
 
-	err := rc.SubscribeConf("/test/conf/TestRemoteConfig_Get", TestConfig{}, confCallback_Get)
+	err := rc.SubscribeConf(path, TestConfig{})
 	if err != nil {
 		t.Fatal("get config fail", err)
 	}
-	if config, ok := getConf_Get().(TestConfig); !ok || !reflect.DeepEqual(config, conf) {
+	if config, ok := rc.GetConf(path).(TestConfig); !ok || !reflect.DeepEqual(config, conf) {
 		t.Fatal("parse err", config, conf, ok)
 	}
-}
-
-var (
-	nodes    atomic.Value
-	getNodes = func() []string {
-		return nodes.Load().([]string)
-	}
-)
-
-func nodesCallback(vals []string) {
-	nodes.Store(vals)
 }
 
 func TestRemoteConfig_RegisterSubscribe(t *testing.T) {
@@ -262,17 +225,17 @@ func TestRemoteConfig_RegisterSubscribe(t *testing.T) {
 	for i, node := range nodes {
 		_ = rc.RegisterNode(path, node, time.Second*time.Duration(i+1))
 	}
-	err := rc.SubscribeNodes(path, nodesCallback)
-	if err != nil || len(getNodes()) != 4 {
-		t.Fatal("subscribe failed", getNodes(), err)
+	err := rc.SubscribeService(path)
+	if err != nil || len(rc.GetService(path)) != 4 {
+		t.Fatal("subscribe failed", rc.GetService(path), err)
 	}
 	sort.Strings(nodes)
-	if !reflect.DeepEqual(getNodes(), nodes) {
+	if !reflect.DeepEqual(rc.GetService(path), nodes) {
 		t.Fatal("invalid subscribe vals")
 	}
 
 	time.Sleep(time.Millisecond * 1200)
-	if len(getNodes()) != 3 {
-		t.Fatal("subscribe failed", getNodes(), err)
+	if len(rc.GetService(path)) != 3 {
+		t.Fatal("subscribe failed", rc.GetService(path), err)
 	}
 }

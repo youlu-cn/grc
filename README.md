@@ -2,10 +2,12 @@
 
 ## Usage
 
-> Define configuration structure with default values
+### Remote Configuration
+
+> Define the configuration structure with default values
 
 ```go
-type Config struct {
+type TestConfig struct {
 	IntVal   int               `json:"int_val" default:"8080"`
 	StrVal   string            `default:"test"`
 	SliceVal []int             `default:"1,2,3,4,ee"`
@@ -13,35 +15,58 @@ type Config struct {
 }
 ```
 
-> Define configuration callback
+> Create grc instance
 
 ```go
-var (
-	config atomic.Value
-)
-
-func configUpdated(v interface{}) {
-	config.Store(v)
+rc, err := grc.New(context.TODO(), grc.EtcdV3, "127.0.0.1:2379", "username", "password")
+if err != nil {
+	//return
 }
 ```
 
-> Create grc instance, and subscribe configuration
+> Subscribe configuration
 
-```golang
-rc, err := grc.New(context.TODO(), grc.EtcdV3, "127.0.0.1:2379", "username", "password")
+```go
+path := "/test/conf"
+err := rc.SubscribeConf(path, TestConfig{})
 if err != nil {
-	return
-}
-err = rc.SubscribeConf("/test/conf", Config{}, configUpdated)
-if err != nil {
-	return
+	//return
 }
 ```
 
 > Use configuration
 
 ```go
-func getConfig() Config {
-	return config.Load().(Config)
+conf := rc.GetConf(path).(TestConfig)
+```
+
+* The return type of `rc.GetConf(path)` is the same as the second parameter passed into `rc.SubscribeConf`. 
+* The type can also be a pointor:
+
+```go
+err := rc.SubscribeConf(path, &TestConfig{})
+if err != nil {
+	//return
 }
+
+conf := rc.GetConf(path).(*TestConfig)
+```
+
+### Service Discovery
+
+> Register node
+
+```go
+node := "127.0.0.1:6600"
+path := "/test/service/a"
+err := rc.RegisterNode(path, node, time.Second*5)
+if err != nil {
+	//return
+}
+```
+
+> Get service nodes
+
+```go
+nodes := rc.GetService(path)
 ```

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/youlu-cn/grc/backend"
@@ -16,11 +17,8 @@ import (
 
 var (
 	ErrUnknownProvider = errors.New("unknown provider type")
-	ErrEmptyCallback   = errors.New("invalid callback")
+	ErrNotRegistered   = errors.New("service or config not registered")
 )
-
-type AtomicUpdateConfig func(interface{})
-type AtomicUpdateNodes func([]string)
 
 type ProviderType string
 
@@ -44,16 +42,25 @@ func New(ctx context.Context, typ ProviderType, endPoint, user, password string)
 	if err != nil {
 		return nil, err
 	}
+	return NewWithProvider(ctx, provider)
+}
 
+func NewWithProvider(ctx context.Context, provider backend.Provider) (*RemoteConfig, error) {
 	return &RemoteConfig{
 		ctx:      ctx,
 		provider: provider,
+		config:   make(map[string]interface{}),
+		service:  make(map[string][]string),
 	}, nil
 }
 
 type RemoteConfig struct {
 	ctx      context.Context
 	provider backend.Provider
+
+	config  map[string]interface{}
+	service map[string][]string
+	sync.RWMutex
 }
 
 // Register node for service discovery
@@ -62,12 +69,8 @@ func (rc *RemoteConfig) RegisterNode(path, nodeID string, ttl time.Duration) err
 	return rc.provider.KeepAlive(rc.ctx, key, ttl)
 }
 
-// Subscribe specified service nodes
-func (rc *RemoteConfig) SubscribeNodes(path string, callback AtomicUpdateNodes) error {
-	if callback == nil {
-		return ErrEmptyCallback
-	}
-
+// Subscribe specified service
+func (rc *RemoteConfig) SubscribeService(path string) error {
 	ctx, cancel := context.WithCancel(rc.ctx)
 	evtChan := rc.provider.Watch(ctx, path, true)
 	kvs, err := rc.provider.Get(rc.ctx, path, true)
@@ -75,28 +78,42 @@ func (rc *RemoteConfig) SubscribeNodes(path string, callback AtomicUpdateNodes) 
 		cancel()
 		return err
 	}
+
 	// parse node list
 	nodes := make([]string, 0, len(kvs))
 	for _, kv := range kvs {
 		node := strings.TrimPrefix(kv.Key, path+"/")
 		nodes = append(nodes, node)
 	}
+
 	// sort node list
 	sort.Strings(nodes)
-	// callback
-	callback(nodes)
+	// store
+	rc.Lock()
+	rc.service[path] = nodes
+	rc.Unlock()
+
 	// watch and update
-	go rc.nodeUpdated(evtChan, path, nodes, callback)
+	go rc.nodeUpdated(evtChan, path, nodes)
 
 	return nil
 }
 
-// Subscribe remote config, return value type is the same as val which is reflect.TypeOf(val).
-func (rc *RemoteConfig) SubscribeConf(path string, val interface{}, callback AtomicUpdateConfig) error {
-	if callback == nil {
-		return ErrEmptyCallback
-	}
+// Get specified service nodes
+func (rc *RemoteConfig) GetService(path string) []string {
+	rc.RLock()
+	nodes, ok := rc.service[path]
+	rc.RUnlock()
 
+	if !ok {
+		log.Println("service not registered", path)
+		panic(ErrNotRegistered)
+	}
+	return nodes
+}
+
+// Subscribe remote config
+func (rc *RemoteConfig) SubscribeConf(path string, val interface{}) error {
 	var config interface{}
 	ctx, cancel := context.WithCancel(rc.ctx)
 	evtChan := rc.provider.Watch(ctx, path, false)
@@ -105,6 +122,7 @@ func (rc *RemoteConfig) SubscribeConf(path string, val interface{}, callback Ato
 		cancel()
 		return err
 	}
+
 	// decode config
 	if len(kvs) == 0 {
 		config = rc.defaultValue(val)
@@ -115,12 +133,28 @@ func (rc *RemoteConfig) SubscribeConf(path string, val interface{}, callback Ato
 		log.Println("decode config failed", kvs[0].Value)
 		return errors.New("decode config failed:" + kvs[0].Value)
 	}
-	// callback
-	callback(config)
+
+	// store
+	rc.Lock()
+	rc.config[path] = config
+	rc.Unlock()
+
 	// watch for config updated
-	go rc.configUpdated(evtChan, val, callback)
+	go rc.configUpdated(evtChan, path, val)
 
 	return nil
+}
+
+func (rc *RemoteConfig) GetConf(path string) interface{} {
+	rc.RLock()
+	conf, ok := rc.config[path]
+	rc.RUnlock()
+
+	if !ok {
+		log.Println("config not registered", path)
+		panic(ErrNotRegistered)
+	}
+	return conf
 }
 
 func (rc *RemoteConfig) defaultValue(val interface{}) interface{} {
@@ -138,7 +172,7 @@ func (rc *RemoteConfig) defaultValue(val interface{}) interface{} {
 	return config
 }
 
-func (rc *RemoteConfig) configUpdated(ch backend.EventChan, val interface{}, callback AtomicUpdateConfig) {
+func (rc *RemoteConfig) configUpdated(ch backend.EventChan, path string, val interface{}) {
 	for {
 		select {
 		case <-rc.ctx.Done():
@@ -160,13 +194,16 @@ func (rc *RemoteConfig) configUpdated(ch backend.EventChan, val interface{}, cal
 				log.Println("decode config failed", data)
 				continue
 			}
-			// callback
-			callback(config)
+
+			// update
+			rc.Lock()
+			rc.config[path] = config
+			rc.Unlock()
 		}
 	}
 }
 
-func (rc *RemoteConfig) nodeUpdated(ch backend.EventChan, path string, nodes []string, callback AtomicUpdateNodes) {
+func (rc *RemoteConfig) nodeUpdated(ch backend.EventChan, path string, nodes []string) {
 	m := make(map[string]int)
 	for _, node := range nodes {
 		m[node] = 0
@@ -194,7 +231,10 @@ func (rc *RemoteConfig) nodeUpdated(ch backend.EventChan, path string, nodes []s
 		}
 		// sort
 		sort.Strings(nodes)
-		// callback
-		callback(nodes)
+
+		// update
+		rc.Lock()
+		rc.service[path] = nodes
+		rc.Unlock()
 	}
 }
