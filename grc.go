@@ -15,7 +15,8 @@ import (
 )
 
 var (
-	ErrCallback = errors.New("invalid callback")
+	ErrUnknownProvider = errors.New("unknown provider type")
+	ErrEmptyCallback   = errors.New("invalid callback")
 )
 
 type AtomicUpdateConfig func(interface{})
@@ -27,20 +28,27 @@ const (
 	EtcdV3 ProviderType = backend.EtcdV3
 )
 
-func NewProvider(typ ProviderType, endPoint, user, password string) (backend.Provider, error) {
+func New(ctx context.Context, typ ProviderType, endPoint, user, password string) (*RemoteConfig, error) {
+	var (
+		provider backend.Provider
+		err      error
+	)
+
 	switch typ {
 	case backend.EtcdV3:
-		return etcdv3.NewProvider(endPoint, user, password)
+		provider, err = etcdv3.NewProvider(endPoint, user, password)
 	default:
-		return nil, nil
+		err = ErrUnknownProvider
 	}
-}
 
-func New(ctx context.Context, provider backend.Provider) *RemoteConfig {
+	if err != nil {
+		return nil, err
+	}
+
 	return &RemoteConfig{
 		ctx:      ctx,
 		provider: provider,
-	}
+	}, nil
 }
 
 type RemoteConfig struct {
@@ -57,7 +65,7 @@ func (rc *RemoteConfig) RegisterNode(path, nodeID string, ttl time.Duration) err
 // Subscribe specified service nodes
 func (rc *RemoteConfig) SubscribeNodes(path string, callback AtomicUpdateNodes) error {
 	if callback == nil {
-		return ErrCallback
+		return ErrEmptyCallback
 	}
 
 	ctx, cancel := context.WithCancel(rc.ctx)
@@ -86,7 +94,7 @@ func (rc *RemoteConfig) SubscribeNodes(path string, callback AtomicUpdateNodes) 
 // Subscribe remote config, return value type is the same as val which is reflect.TypeOf(val).
 func (rc *RemoteConfig) SubscribeConf(path string, val interface{}, callback AtomicUpdateConfig) error {
 	if callback == nil {
-		return ErrCallback
+		return ErrEmptyCallback
 	}
 
 	var config interface{}
