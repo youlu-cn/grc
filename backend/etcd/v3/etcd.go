@@ -90,9 +90,15 @@ func (v3 *EtcdV3) Watch(ctx context.Context, key string, withPrefix bool) backen
 				return
 
 			case resp := <-etcdChan:
-				if resp.Canceled {
-					log.Println("etcd watching failure", resp.Err())
-					return
+				if err := resp.Err(); err != nil {
+					log.Println("etcd watch failure", err)
+					// reset
+					time.Sleep(time.Second)
+					etcdChan = v3.Client.Watch(ctx, key, options...)
+					eventsChan <- &backend.WatchEvent{
+						Type: backend.Reset,
+					}
+					continue
 				}
 				for _, evt := range resp.Events {
 					wEvent := &backend.WatchEvent{
@@ -106,7 +112,6 @@ func (v3 *EtcdV3) Watch(ctx context.Context, key string, withPrefix bool) backen
 					} else {
 						wEvent.Type = backend.Delete
 					}
-
 					eventsChan <- wEvent
 				}
 			}

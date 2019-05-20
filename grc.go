@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/youlu-cn/grc/backend"
-	"github.com/youlu-cn/grc/backend/etcd/v3"
+	"github.com/youlu-cn/grc/backend/debug"
+	etcdv3 "github.com/youlu-cn/grc/backend/etcd/v3"
 )
 
 var (
@@ -23,7 +24,8 @@ var (
 type ProviderType string
 
 const (
-	EtcdV3 ProviderType = backend.EtcdV3
+	Debug  ProviderType = backend.Debug
+	EtcdV3              = backend.EtcdV3
 )
 
 func New(ctx context.Context, typ ProviderType, endPoint, user, password string) (*RemoteConfig, error) {
@@ -33,6 +35,8 @@ func New(ctx context.Context, typ ProviderType, endPoint, user, password string)
 	)
 
 	switch typ {
+	case backend.Debug:
+		provider, err = debug.NewProvider()
 	case backend.EtcdV3:
 		provider, err = etcdv3.NewProvider(endPoint, user, password)
 	default:
@@ -71,23 +75,12 @@ func (rc *RemoteConfig) RegisterNode(path, nodeID string, ttl time.Duration) err
 
 // Subscribe specified service
 func (rc *RemoteConfig) SubscribeService(path string) error {
-	ctx, cancel := context.WithCancel(rc.ctx)
-	evtChan := rc.provider.Watch(ctx, path, true)
-	kvs, err := rc.provider.Get(rc.ctx, path, true)
+	evtChan := rc.provider.Watch(rc.ctx, path, true)
+	nodes, err := rc.parseNode(path)
 	if err != nil {
-		cancel()
 		return err
 	}
 
-	// parse node list
-	nodes := make([]string, 0, len(kvs))
-	for _, kv := range kvs {
-		node := strings.TrimPrefix(kv.Key, path+"/")
-		nodes = append(nodes, node)
-	}
-
-	// sort node list
-	sort.Strings(nodes)
 	// store
 	rc.Lock()
 	rc.service[path] = nodes
@@ -114,24 +107,10 @@ func (rc *RemoteConfig) GetService(path string) []string {
 
 // Subscribe remote config
 func (rc *RemoteConfig) SubscribeConf(path string, val interface{}) error {
-	var config interface{}
-	ctx, cancel := context.WithCancel(rc.ctx)
-	evtChan := rc.provider.Watch(ctx, path, false)
-	kvs, err := rc.provider.Get(rc.ctx, path, false)
+	evtChan := rc.provider.Watch(rc.ctx, path, false)
+	config, err := rc.parseConfig(path, val)
 	if err != nil {
-		cancel()
 		return err
-	}
-
-	// decode config
-	if len(kvs) == 0 {
-		config = rc.defaultValue(val)
-	} else {
-		config = Decode(kvs[0].Value, val)
-	}
-	if config == nil {
-		log.Println("decode config failed", kvs[0].Value)
-		return errors.New("decode config failed:" + kvs[0].Value)
 	}
 
 	// store
@@ -172,6 +151,28 @@ func (rc *RemoteConfig) defaultValue(val interface{}) interface{} {
 	return config
 }
 
+func (rc *RemoteConfig) parseConfig(path string, val interface{}) (interface{}, error) {
+	var config interface{}
+	ctx, cancel := context.WithCancel(rc.ctx)
+	defer cancel()
+	kvs, err := rc.provider.Get(ctx, path, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// decode config
+	if len(kvs) == 0 {
+		config = rc.defaultValue(val)
+	} else {
+		config = Decode(kvs[0].Value, val)
+	}
+	if config == nil {
+		log.Println("decode config failed", kvs[0].Value)
+		return nil, errors.New("decode config failed:" + kvs[0].Value)
+	}
+	return config, nil
+}
+
 func (rc *RemoteConfig) configUpdated(ch backend.EventChan, path string, val interface{}) {
 	for {
 		select {
@@ -182,16 +183,24 @@ func (rc *RemoteConfig) configUpdated(ch backend.EventChan, path string, val int
 
 		case evt := <-ch:
 			var (
+				err    error
 				config interface{}
-				data   = evt.Value
 			)
-			if evt.Type == backend.Put {
-				config = Decode(data, val)
-			} else if evt.Type == backend.Delete {
+
+			switch evt.Type {
+			case backend.Put:
+				config = Decode(evt.Value, val)
+			case backend.Delete:
 				config = rc.defaultValue(val)
+			case backend.Reset:
+				config, err = rc.parseConfig(path, val)
+				if err != nil {
+					continue
+				}
 			}
+
 			if config == nil {
-				log.Println("decode config failed", data)
+				log.Println("decode config failed", evt.Value)
 				continue
 			}
 
@@ -203,8 +212,28 @@ func (rc *RemoteConfig) configUpdated(ch backend.EventChan, path string, val int
 	}
 }
 
+func (rc *RemoteConfig) parseNode(path string) ([]string, error) {
+	ctx, cancel := context.WithCancel(rc.ctx)
+	defer cancel()
+	kvs, err := rc.provider.Get(ctx, path, true)
+	if err != nil {
+		return nil, err
+	}
+
+	// parse node list
+	nodes := make([]string, 0, len(kvs))
+	for _, kv := range kvs {
+		node := strings.TrimPrefix(kv.Key, path+"/")
+		nodes = append(nodes, node)
+	}
+
+	// sort node list
+	sort.Strings(nodes)
+	return nodes, nil
+}
+
 func (rc *RemoteConfig) nodeUpdated(ch backend.EventChan, path string, nodes []string) {
-	m := make(map[string]int)
+	m := make(map[string]int, len(nodes))
 	for _, node := range nodes {
 		m[node] = 0
 	}
@@ -218,15 +247,25 @@ func (rc *RemoteConfig) nodeUpdated(ch backend.EventChan, path string, nodes []s
 
 		case evt := <-ch:
 			node := strings.TrimPrefix(evt.Key, path+"/")
-			if evt.Type == backend.Put {
+			switch evt.Type {
+			case backend.Put:
 				m[node] = 0
-			} else if evt.Type == backend.Delete {
+			case backend.Delete:
 				delete(m, node)
+			case backend.Reset:
+				ns, err := rc.parseNode(path)
+				if err != nil {
+					continue
+				}
+				m = make(map[string]int, len(ns))
+				for _, node := range ns {
+					m[node] = 0
+				}
 			}
 		}
 
 		nodes = make([]string, 0, len(m))
-		for node, _ := range m {
+		for node := range m {
 			nodes = append(nodes, node)
 		}
 		// sort

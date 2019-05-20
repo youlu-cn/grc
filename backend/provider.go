@@ -6,6 +6,7 @@ import (
 )
 
 const (
+	Debug  = "debug"
 	EtcdV3 = "etcdv3"
 )
 
@@ -15,9 +16,12 @@ const (
 	WriteTimeout = time.Second * 3
 )
 
+type EventType string
+
 const (
-	Put    = "put"
-	Delete = "delete"
+	Put    EventType = "put"
+	Delete           = "delete"
+	Reset            = "reset"
 )
 
 type KVPair struct {
@@ -29,7 +33,7 @@ type KVPairs []*KVPair
 
 type WatchEvent struct {
 	KVPair
-	Type string
+	Type EventType
 }
 
 type EventChan chan *WatchEvent
