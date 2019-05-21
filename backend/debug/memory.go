@@ -123,6 +123,19 @@ func (p *Memory) Close() error {
 	return nil
 }
 
+// For debug
+func (p *Memory) Down(key string) {
+	p.Lock()
+	defer p.Unlock()
+	delete(p.kvs, key)
+	p.event <- &backend.WatchEvent{
+		Type: backend.Delete,
+		KVPair: backend.KVPair{
+			Key: key,
+		},
+	}
+}
+
 func (p *Memory) checkTTL() {
 	ticker := time.NewTicker(time.Millisecond * 100)
 
@@ -158,7 +171,8 @@ func (p *Memory) checkWatch() {
 		case evt := <-p.event:
 			p.RLock()
 			for _, w := range p.ws {
-				if w.prefix && strings.HasPrefix(evt.Key, w.key) {
+				if evt.Key == w.key ||
+					w.prefix && strings.HasPrefix(evt.Key, w.key) {
 					w.ch <- evt
 				}
 			}

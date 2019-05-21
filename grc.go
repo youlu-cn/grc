@@ -19,6 +19,7 @@ import (
 var (
 	ErrUnknownProvider = errors.New("unknown provider type")
 	ErrNotRegistered   = errors.New("service or config not registered")
+	ErrInvalidDuration = errors.New("invalid ttl")
 )
 
 type ProviderType string
@@ -69,6 +70,9 @@ type RemoteConfig struct {
 
 // Register node for service discovery
 func (rc *RemoteConfig) RegisterNode(path, nodeID string, ttl time.Duration) error {
+	if ttl < time.Second {
+		return ErrInvalidDuration
+	}
 	key := fmt.Sprintf("%v/%v", path, nodeID)
 	return rc.provider.KeepAlive(rc.ctx, key, ttl)
 }

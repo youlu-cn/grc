@@ -97,4 +97,10 @@ func TestRemoteConfig_RegisterSubscribe(t *testing.T) {
 	if !reflect.DeepEqual(rc.GetService(path), nodes) {
 		t.Fatal("invalid subscribe vals")
 	}
+
+	provider.(*debug.Memory).Down(path + "/" + nodes[len(nodes)-1])
+	time.Sleep(time.Millisecond * 100)
+	if len(rc.GetService(path)) != 3 {
+		t.Fatal("subscribe err")
+	}
 }
